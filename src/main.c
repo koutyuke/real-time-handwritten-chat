@@ -1,15 +1,20 @@
-#include <X11/Xlib.h>
-#include <X11/Xutil.h>
+#define _DEFAULT_SOURCE
+
+#include <arpa/inet.h>
 #include <fcntl.h>
+#include <netdb.h>
+#include <netinet/in.h>
 #include <stdbool.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/socket.h>
 #include <sys/time.h>
 #include <sys/types.h>
-#include <time.h>
 #include <unistd.h>
 
+#include "chat/chat.h"
+#include "data/data.h"
 #include "lib/error.h"
 
 #define NAME_SIZE 40
@@ -17,165 +22,401 @@
 #define BUF_SIZE_LONG 2048
 #define MAX_CLIENTS 10
 #define PORT_NO (u_short)20000
-#define GRID_X 5
-#define GRID_Y 4
+#define ErrorExit(x)          \
+    {                         \
+        fprintf(stderr, "-"); \
+        perror(x);            \
+        exit(0);              \
+    }
 
-struct Stroke {
-  XPoint p0;
-  XPoint p1;
-  unsigned long color;
-  bool en;
-  struct Stroke *next;
-};
-
-struct Stroke currentStroke;
 int i, j, msgLength, inputLength, result;
-char inputBuf[BUF_SIZE];
+char buf[BUF_SIZE], inputBuf[BUF_SIZE], inputCommand[BUF_SIZE],
+    strBuf[BUF_SIZE_LONG], hostName[NAME_SIZE], cmd,
+    param[sizeof(char) * BUF_SIZE];
+struct sockaddr_in sockAddr;
+struct hostent *host;
 struct timeval timeVal;
 fd_set mask;
 
 Display *display;
 Window window;
-XSetWindowAttributes attributes;
 GC gc;
-XEvent event;
-XPoint startPoint;
+unsigned long currentColor;
 
-void createWindow(int, int, char *);
-void onEvent();
-void parseCommand(char *);
-unsigned long parseColor(char *);
-void startPainter();
+void startServer();
+void startClient();
 
 int main() {
-  timeVal.tv_sec = 0;
-  timeVal.tv_usec = 1;
-  startPainter();
-}
-
-void createWindow(int x, int y, char *title) {
-  display = XOpenDisplay(NULL);
-
-  // https://stackoverflow.com/a/15089506/1355992
-  XSizeHints hints = {0};
-  hints.flags = PPosition | PSize;
-  hints.x = x;
-  hints.y = y;
-  hints.width = 400;
-  hints.height = 300;
-
-  window =
-      XCreateSimpleWindow(display, RootWindow(display, 0), x, y, 400, 300, 5,
-                          BlackPixel(display, 0), WhitePixel(display, 0));
-  attributes.backing_store = WhenMapped;
-  XChangeWindowAttributes(display, window, CWBackingStore, &attributes);
-  XSelectInput(display, window,
-               ExposureMask | ButtonPressMask | ButtonMotionMask);
-  XStoreName(display, window, title);
-  XSetNormalHints(display, window, &hints);
-  XMapWindow(display, window);
-  gc = XCreateGC(display, DefaultRootWindow(display), 0, 0);
-  XSetForeground(display, gc, parseColor("000000"));
-  XSetLineAttributes(display, gc, 3, LineSolid, CapRound, JoinRound);
-}
-void onEvent() {
-  if (XEventsQueued(display, QueuedAfterFlush) == 0) return;
-  XNextEvent(display, &event);
-  switch (event.type) {
-    case Expose:
-      // Redraw the window content here!
-      break;
-    case ButtonPress:
-      startPoint.x = event.xbutton.x;
-      startPoint.y = event.xbutton.y;
-      break;
-    case MotionNotify:
-      XDrawLine(display, window, gc, startPoint.x, startPoint.y,
-                event.xmotion.x, event.xmotion.y);
-      startPoint.x = event.xmotion.x;
-      startPoint.y = event.xmotion.y;
-      break;
-  }
-}
-
-void parseCommand(char *input) {
-  // C-RRGGBB or C-RGB: Set pen color
-  char cmd, param[sizeof(char) * BUF_SIZE];
-  char *token, separator[2] = "\n";
-  token = strtok(input, separator);
-  while (token != NULL) {
-    bzero(param, sizeof(char) * BUF_SIZE);
-    sscanf(token, "%c-%s", &cmd, param);
-    switch (cmd) {
-      case 'C':
-      case 'c': {
-        unsigned long colorVal = parseColor(param);
-        XSetForeground(display, gc, colorVal);
-      } break;
-      case 'Q':
-        break;
-      default:
-        printf("%s: Invalid command!\n", input);
-        break;
+    timeVal.tv_sec = 0;
+    timeVal.tv_usec = 1;
+    while (1) {
+        printf("Please select your role.\n");
+        printf("Server: 1 ; Client: 2 \n");
+        scanf("%s", inputBuf);
+        if (strcmp(inputBuf, "1") == 0 || strcmp(inputBuf, "2") == 0) break;
     }
-    token = strtok(NULL, separator);
-  }
-  // recover the last line break trimmed by strtok()
-  if (strlen(input) > 0 && input[strlen(input) - 1] != '\n')
-    strcat(input, "\n");
+    if (strcmp(inputBuf, "1") == 0)
+        startServer();
+    else if (strcmp(inputBuf, "2") == 0)
+        startClient();
 }
 
-unsigned long parseColor(char *colorHex) {
-  unsigned int r = 0, g = 0, b = 0;
-  unsigned long colorVal;
-  char colorBuf[16];
-  if (sscanf(colorHex, "%lx", &colorVal) == 1) {
-    if (strlen(colorHex) == 3) {
-      sscanf(colorHex, "%1x%1x%1x", &r, &g, &b);
-      r += r * 16;
-      g += g * 16;
-      b += b * 16;
-    } else if (strlen(colorHex) >= 6)
-      sscanf(colorHex, "%02x%02x%02x", &r, &g, &b);
-  }
-  sprintf(colorBuf, "rgb:%02x/%02x/%02x", r, g, b);
-  XColor scrColor, exactColor;
-  XAllocNamedColor(display, DefaultColormap(display, DefaultScreen(display)),
-                   colorBuf, &scrColor, &exactColor);
-  printf("\33[48;2;%d;%d;%dm          ", r, g, b);
-  printf("\33[0m\n");
-  return scrColor.pixel;
-}
+void startServer() {
+    int fdToListen, fdClientList[MAX_CLIENTS], fd, fdTemp, fdMax, clientCnt = 0;
+    int inputLength;
 
-void startPainter() {
-  bool hasNext;
-  createWindow(200, 200, "Painter");
+    char space[1100];
+    char *token, separator[2] = "\n";
+    Data *clientBuf = NULL, *serverBuf = NULL, *setData = NULL;
+    Data *drowData = NULL, *chatData = NULL;
 
-  while (1) {
-    onEvent();
+    bool hasNext;
 
-    FD_ZERO(&mask);
-    // Set the fd to be watched (fd=0 means standard input)
-    FD_SET(0, &mask);
-    hasNext = true;
-    result = select(0 + 1, &mask, NULL, NULL, &timeVal);
-    if (result < 0) exit_as_error("select");
-    // Message input via stdio (fd=0 means standard input)
-    // Q: Quit from the running program
-    if (FD_ISSET(0, &mask)) {
-      bzero(inputBuf, sizeof(char) * BUF_SIZE);
-      int inputLength = read(0, inputBuf, sizeof(char) * BUF_SIZE);
-      // "Quit" command input
-      if (strcmp(inputBuf, "Q\n") == 0 || inputLength == 0) {
-        strcpy(inputBuf, "Q\n");
-        hasNext = false;
-      }
-      parseCommand(inputBuf);
+    // windowの作成
+    createWindow(200, 200, "Server", &display, &window, &gc, &currentColor);
+
+    // 初期化
+    bzero(fdClientList, sizeof(int) * MAX_CLIENTS);
+
+    if (gethostname(hostName, sizeof(hostName)) < 0) {
+        ErrorExit("gethostname")
+    };
+    printf("Your hostname is '%s'\n", hostName);
+
+    host = gethostbyname(hostName);
+    if (host == NULL) {
+        ErrorExit("gethostbyname")
+    };
+
+    bzero((char *)&sockAddr, sizeof(sockAddr));
+
+    sockAddr.sin_family = AF_INET;
+    sockAddr.sin_port = htons(PORT_NO);
+    bcopy((char *)host->h_addr_list[0], (char *)&sockAddr.sin_addr,
+          host->h_length);
+
+    // socketのfdがreturn
+    fdToListen = socket(AF_INET, SOCK_STREAM, 0);
+    if (fdToListen < 0) {
+        ErrorExit("socket")
+    };
+    int option = 1;
+    setsockopt(fdToListen, SOL_SOCKET, SO_REUSEADDR, &option, sizeof(option));
+
+    // socketの設定
+    if (bind(fdToListen, (struct sockaddr *)&sockAddr, sizeof(sockAddr)) < 0) {
+        ErrorExit("bind")
+    };
+
+    // 接続待ち
+    listen(fdToListen, 1);
+    // 標準出力
+    write(1, "Waiting for someone to connect...\n", 34);
+
+    while (1) {
+        // Eventの監視
+        onServerEvent(display, &window, &gc, fdClientList, &drowData,
+                      &currentColor);
+
+        FD_ZERO(&mask);
+        FD_SET(fdToListen, &mask);
+        FD_SET(0, &mask);
+
+        fdMax = fdToListen;
+        hasNext = true;
+        for (i = 0; i < MAX_CLIENTS; i++) {
+            fd = fdClientList[i];
+            if (fd > 0) {
+                FD_SET(fd, &mask);
+            }
+            if (fd > fdMax) {
+                fdMax = fd;
+            }
+        }
+
+        result = select(fdMax + 1, &mask, NULL, NULL, &timeVal);
+        if (result < 0) {
+            ErrorExit("select")
+        };
+
+        // A new client called connect()
+        if (FD_ISSET(fdToListen, &mask)) {
+            fd = accept(fdToListen, NULL, NULL);
+            if (fd < 0) {
+                ErrorExit("accept")
+            };
+            for (i = 0; i < MAX_CLIENTS; i++) {
+                if (fdClientList[i] == 0) {
+                    fdClientList[i] = fd;
+                    clientCnt++;
+                    break;
+                }
+            }
+        }
+
+        // Message input via stdio (fd=0 means standard input)
+        inputLength = 0;
+        if (FD_ISSET(0, &mask)) {
+            bzero(inputBuf, sizeof(char) * BUF_SIZE);
+            bzero(inputCommand, sizeof(char) * BUF_SIZE);
+            inputLength = read(0, inputBuf, BUF_SIZE);
+            strcpy(inputCommand, inputBuf);
+            token = strtok(inputCommand, separator);
+            sscanf(token, "%c-%s", &cmd, param);
+            // "Quit" command input
+            if (strcmp(inputBuf, "Q\n") == 0 || inputLength == 0) {
+                printf("Quit\n");
+                strcpy(inputBuf, "Q\n");
+                hasNext = false;
+            }
+        }
+
+        // Iterate through all active clients
+
+        // サーバーからのメッセージ入力
+        if (inputLength > 0) {
+            serverBuf = createData();
+            serverBuf->type = CHAT;
+            serverBuf->id = -1;
+            serverBuf->comment.color = 1;
+
+            if (strcmp(inputBuf, "Q\n") == 0) {
+                strcpy(serverBuf->comment.text, inputBuf);
+            } else if (cmd == 'C' || cmd == 'c') {
+                currentColor = parseColor(param, display);
+            } else {
+                sprintf(space, "\x1b[38;5;%dmserver: %s\x1b[0m", 1, inputBuf);
+                serverBuf->comment.color = 1;
+                strncpy(serverBuf->comment.text, space, BUF_SIZE);
+            }
+
+            setData = createData();
+            *setData = *serverBuf;
+            if (chatData == NULL) {
+                chatData = setData;
+            } else {
+                addData(setData, chatData);
+            }
+            free(serverBuf);
+        }
+
+        for (i = 0; i < MAX_CLIENTS; i++) {
+            fd = fdClientList[i];
+            if (fd == 0) {
+                continue;
+            }
+
+            // サーバーからのメッセージを反映
+            if (inputLength > 0) {
+                serverBuf = createData();
+                serverBuf->type = CHAT;
+                serverBuf->id = -1;
+                serverBuf->comment.color = 1;
+
+                if (strcmp(inputBuf, "Q\n") == 0) {
+                    strcpy(serverBuf->comment.text, inputBuf);
+                } else if (cmd != 'C' && cmd != 'c') {
+                    sprintf(space, "\x1b[38;5;%dmserver: %s\x1b[0m", 1,
+                            inputBuf);
+                    serverBuf->comment.color = 1;
+                    strncpy(serverBuf->comment.text, space, BUF_SIZE);
+                }
+
+                Data *sample = chatData;
+
+                write(fd, serverBuf, sizeof(Data));
+                free(serverBuf);
+            }
+
+            // クライアントからのメッセージ確認
+            if (FD_ISSET(fd, &mask)) {
+                bzero(buf, sizeof(char) * BUF_SIZE);
+                clientBuf = createData();
+                msgLength = read(fd, clientBuf, sizeof(Data));
+
+                if (clientBuf->type == CHAT) {
+                    // "Quit" command received
+                    if (strcmp(clientBuf->comment.text, "Q\n") == 0 ||
+                        msgLength == 0) {
+                        close(fd);
+                        fdClientList[i] = 0;
+                        clientCnt--;
+                        continue;
+                    }
+                    strncpy(buf, clientBuf->comment.text, BUF_SIZE);
+
+                    clientBuf->id = i;
+                    clientBuf->comment.color = i * 10 + 11;
+                    sprintf(space, "\x1b[38;5;%dmclient[%02d]: %s\x1b[0m",
+                            i * 10 + 11, i, buf);
+                    strncpy(clientBuf->comment.text, space, BUF_SIZE);
+
+                    // Print the received message (fd=1 means standard output)
+                    write(1, clientBuf->comment.text, sizeof(char) * BUF_SIZE);
+                    // And also send that message to all other clients,
+                    // except for the client who sent the message just now
+                    for (j = 0; j < MAX_CLIENTS; j++) {
+                        fdTemp = fdClientList[j];
+                        if (j == i || fdTemp == 0) continue;
+                        write(fdTemp, clientBuf, sizeof(Data));
+                    }
+
+                    setData = createData();
+                    *setData = *clientBuf;
+
+                    if (chatData == NULL) {
+                        chatData = setData;
+                    } else {
+                        addData(setData, chatData);
+                    }
+                } else if (clientBuf->type == LOADCHAT) {
+                    if (chatData != NULL) {
+                        setData = chatData;
+                        while (setData != NULL) {
+                            write(fd, setData, sizeof(Data));
+                            setData = setData->next;
+                        }
+                    }
+                } else if (clientBuf->type == DRAW) {
+                    clientBuf->id = i;
+                    XSetForeground(display, gc, clientBuf->point.color);
+                    XDrawLine(display, window, gc, clientBuf->point.startX,
+                              clientBuf->point.startY, clientBuf->point.endX,
+                              clientBuf->point.endY);
+
+                    for (j = 0; j < MAX_CLIENTS; j++) {
+                        fdTemp = fdClientList[j];
+                        if (j == i || fdTemp == 0) continue;
+                        write(fdTemp, clientBuf, sizeof(Data));
+                    }
+
+                    setData = createData();
+                    *setData = *clientBuf;
+
+                    if (drowData == NULL) {
+                        drowData = setData;
+                    } else {
+                        addData(setData, drowData);
+                    }
+                } else if (clientBuf->type == LOADDRAW) {
+                    if (drowData != NULL) {
+                        setData = drowData;
+                        while (setData != NULL) {
+                            write(fd, setData, sizeof(Data));
+                            setData = setData->next;
+                        }
+                    }
+                }
+
+                free(clientBuf);
+            }
+        }
+        if (!hasNext) {
+            break;
+        }
     }
 
-    if (!hasNext) break;
-  }
+    for (i = 0; i < MAX_CLIENTS; i++) {
+        fd = fdClientList[i];
+        if (fd > 0) {
+            close(fd);
+        }
+    }
+    XDestroyWindow(display, window);
+    XCloseDisplay(display);
+    close(fdToListen);
+}
 
-  XDestroyWindow(display, window);
-  XCloseDisplay(display);
+void startClient() {
+    int fdToConnect;
+    char *token, separator[2] = "\n";
+
+    Data *clientBuf = NULL, *serverBuf = NULL;
+
+    printf("Please enter the server's hostname:\n");
+    scanf("%s", hostName);
+    host = gethostbyname(hostName);
+    if (host == NULL) {
+        ErrorExit("gethostbyname")
+    };
+    bzero((char *)&sockAddr, sizeof(sockAddr));
+    sockAddr.sin_family = AF_INET;
+    sockAddr.sin_port = htons(PORT_NO);
+    bcopy((char *)host->h_addr_list[0], (char *)&sockAddr.sin_addr,
+          host->h_length);
+    fdToConnect = socket(AF_INET, SOCK_STREAM, 0);
+    if (fdToConnect < 0) {
+        ErrorExit("socket")
+    };
+    int option = 1;
+    setsockopt(fdToConnect, SOL_SOCKET, SO_REUSEADDR, &option, sizeof(option));
+    connect(fdToConnect, (struct sockaddr *)&sockAddr, sizeof(sockAddr));
+
+    // create a window
+    createWindow(200, 200, "Client", &display, &window, &gc, &currentColor);
+
+    // 1 標準出力
+    write(1, "Please wait until someone sends a message...\n", 45);
+
+    clientBuf = createData();
+    clientBuf->type = LOADCHAT;
+    write(fdToConnect, clientBuf, sizeof(Data));
+    while (1) {
+        onClientEvent(display, &window, &gc, fdToConnect, &currentColor);
+        FD_ZERO(&mask);
+        FD_SET(fdToConnect, &mask);
+        FD_SET(0, &mask);
+        result = select(fdToConnect + 1, &mask, NULL, NULL, &timeVal);
+        if (result < 0) {
+            ErrorExit("select")
+        };
+
+        // サーバーからのメッセージ
+        if (FD_ISSET(fdToConnect, &mask)) {
+            serverBuf = createData();
+            msgLength = read(fdToConnect, serverBuf, sizeof(Data));
+            // "Quit" command received
+            if (strcmp(serverBuf->comment.text, "Q\n") == 0 || msgLength == 0) {
+                break;
+            }
+
+            // Print the received message (fd=1 means standard output)
+            // 標準出力
+            if (serverBuf->type == CHAT) {
+                write(1, serverBuf->comment.text, sizeof(char) * BUF_SIZE);
+            } else if (serverBuf->type == DRAW) {
+                XSetForeground(display, gc, serverBuf->point.color);
+                XDrawLine(display, window, gc, serverBuf->point.startX,
+                          serverBuf->point.startY, serverBuf->point.endX,
+                          serverBuf->point.endY);
+            }
+            free(serverBuf);
+        }
+        // クライアントからのメッセージ入力
+        if (FD_ISSET(0, &mask)) {
+            bzero(inputBuf, sizeof(char) * BUF_SIZE);
+            bzero(inputCommand, sizeof(char) * BUF_SIZE);
+            clientBuf = createData();
+            clientBuf->type = CHAT;
+
+            inputLength = read(0, inputBuf, BUF_SIZE);
+            strcpy(clientBuf->comment.text, inputBuf);
+            strcpy(inputCommand, inputBuf);
+            token = strtok(inputCommand, separator);
+            sscanf(token, "%c-%s", &cmd, param);
+            // Send the message to server
+            if (cmd == 'C' || cmd == 'c') {
+                currentColor = parseColor(param, display);
+            } else {
+                write(fdToConnect, clientBuf, sizeof(Data));
+            }
+            // "Quit" command input
+            if (strcmp(inputBuf, "Q\n") == 0 || inputLength == 0) {
+                break;
+            }
+
+            free(clientBuf);
+        }
+    }
+    close(fdToConnect);
 }

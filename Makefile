@@ -50,6 +50,7 @@ $(TARGET): $(OBJS)
 
 $(OUT_DIR)/%.o:%.c
 	@if [ ! -e `dirname $@` ]; then mkdir -p `dirname $@`; fi
-	$(COMPILER) $(C_FLAGS) $(INCLUDE_FLAGS) -o $@ -c $<
+	$(COMPILER) $(INCLUDE_FLAGS) -o $@ -c $<
+	# $(COMPILER) $(C_FLAGS) $(INCLUDE_FLAGS) -o $@ -c $<
 
 -include $(DEPENDS)

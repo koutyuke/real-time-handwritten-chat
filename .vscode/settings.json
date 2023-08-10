@@ -162,5 +162,8 @@
   "[makefile]": {
     "editor.insertSpaces": false,
     "editor.tabSize": 2
+  },
+  "files.associations": {
+    "stdbool.h": "c"
   }
 }
